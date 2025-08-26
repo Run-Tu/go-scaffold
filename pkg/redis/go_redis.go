@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"reflect"
+	"strconv"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -134,7 +136,7 @@ func ListOps() {
 	}
 }
 
-// HaspCRUD
+// HashCRUD
 func HashOps() {
 	hashKey := "user:2:profile"
 	clearKeys(hashKey)
@@ -156,10 +158,114 @@ func HashOps() {
 	for i, field := range fields {
 		fmt.Printf("%skey的%s字段的值是 %v \n", hashKey, field, fields_value[i])
 	}
+
+	// ======== HGET: 获取所有字段的值 ========
+	profile, _ := rdb.HGetAll(ctx, hashKey).Result()
+	fmt.Println("HGETALL获取key的所有信息:", profile)
+	fmt.Printf("%s的类型是:%v\n", "profile", reflect.TypeOf(profile))
+
+	// ======== HINCRBY: 对字段值进行原子增减 ========
+	// 应用场景:统计用户积分、登录次数(可避免先读取再写入的复杂操作)
+	// 1为原子增,-1为原子减
+	newAge, _ := rdb.HIncrBy(ctx, hashKey, "age", 1).Result()
+	fmt.Printf("key:%s,HINCRBY修改后的%s字段值为:%v\n", hashKey, "age", newAge)
+	fmt.Printf("修改后新值的类型是:%v\n", reflect.TypeOf(newAge))
+
+	// ======== HEXISTS: 检查字段是否存在 ========
+	exists, _ := rdb.HExists(ctx, hashKey, "city").Result()
+	fmt.Printf("字段'%s' 是否存在:%v\n", "city", exists)
+
+	// ======== HDEL: 删除一个或多个字段 ========
+	rdb.HDel(ctx, hashKey, "email")
+	fmt.Println("HDel 删除 email 字段后")
+	profileAfterDel, _ := rdb.HGetAll(ctx, hashKey).Result()
+	fmt.Println("当前用户信息:", profileAfterDel)
+
+}
+
+// SetCRUD
+func SetOps() {
+	setKey1 := "article:1:tags" // 文章1标签
+	setKey2 := "article:2:tags" // 文章2标签
+	clearKeys(setKey1)
+	clearKeys(setKey2)
+
+	// ======== SADD: 添加一个或多个成员 ========
+	// 应用场景：为文章、商品等打标签
+	rdb.SAdd(ctx, setKey1, "go", "redis", "web")
+	rdb.SAdd(ctx, setKey2, "go", "docekr", "performance")
+	fmt.Println("为两个文章添加标签")
+
+	// ======== SMEMBERS: 获取集合中的所有成员 =======
+	tags1, _ := rdb.SMembers(ctx, setKey1).Result()
+	fmt.Println("文章1的所有标签:", tags1)
+
+	// ======== SISMEMBER: 判断成员是否存在于集合中 ========
+	isMember, _ := rdb.SIsMember(ctx, setKey1, "redis").Result()
+	fmt.Printf("'%s'是不是文章1的标签:%v\n", "redis", isMember)
+
+	// ======== SCARD: 获取集合的成员数量 =======
+	count, _ := rdb.SCard(ctx, setKey2).Result()
+	fmt.Printf("文章'%s'标签的数量是:%v\n", setKey2, count)
+
+	// ======== SINTER: 获取两个或多个集合的交集 ========
+	// 应用场景：发现共同兴趣、共同好友、相关文章等
+	commonTags, _ := rdb.SInter(ctx, setKey1, setKey2).Result()
+	fmt.Println("两篇文章的共同标签(交集):", commonTags)
+
+	// ======== SUNION: 获取两个或多个集合的并集 ========
+	allTags, _ := rdb.SUnion(ctx, setKey1, setKey2).Result()
+	fmt.Println("两篇文章的所有标签(并集):", allTags)
+
+	// ======== SREM: 从集合中移除一个或多个成员 ========
+	rdb.SRem(ctx, setKey1, "web")
+	tags1AfterRem, _ := rdb.SMembers(ctx, setKey1).Result()
+	fmt.Println("从文章1移除 'web' 标签后:", tags1AfterRem)
+}
+
+// SortedCRUD
+func SortedSetOps() {
+	// Zset存储的也是字符串成员类型；每个成员关联一个分数(score)；大多数操作时间复杂度是O(logN)
+	// 排行榜系统、新闻Feed
+	// 与Hash配合使用，先查id排名，再查id信息
+	zsetKey := "game:leaderboard"
+	clearKeys(zsetKey)
+
+	// ======== ZADD: 添加一个或多个成员，每个成员都有一个分数(score) ========
+	// 应用场景：排行榜、带权重的任务队列等
+	rdb.ZAdd(ctx, zsetKey, redis.Z{Score: 1500, Member: "PlayerOne"})
+	rdb.ZAdd(ctx, zsetKey, redis.Z{Score: 1400, Member: "PlayerTwo"})
+	rdb.ZAdd(ctx, zsetKey, redis.Z{Score: 1300, Member: "PlayerThree"})
+	fmt.Println("添加三条玩家数据")
+
+	// ======== ZSCORE: 获取指定成员的分数 ========
+	score, _ := rdb.ZScore(ctx, zsetKey, "PlayerOne").Result()
+	fmt.Println("PlayerOne 的当前分数:", score)
+
+	// ======== ZRANK/ZREVRANK: 获取成员的排名 (升序/降序) ========
+	// 排名从0开始
+	rank, _ := rdb.ZRevRank(ctx, zsetKey, "PlayerOne").Result() // ZREVRANK 用于从高到低的排名
+	fmt.Println("PlayerOne 的当前排名(从高到低):", rank)
+
+	// ======== ZRANGE/ZREVRANGE: 按排名范围获取成员 ========
+	// 应用场景：获取排行榜Top N
+	// ZRevRangeWithScores: 获取指定范围的成员，并带上他们的分数 (从高到低)
+	top3, _ := rdb.ZRevRangeWithScores(ctx, zsetKey, 0, 2).Result() // 获取排名前3的玩家 (0, 1, 2)
+	fmt.Println("排行榜 Top 3:")
+	for _, player := range top3 {
+		fmt.Printf("  - 玩家: %s, 分数: %s\n", player.Member, strconv.FormatFloat(player.Score, 'f', -1, 64))
+	}
+
+	// ======== ZCOUNT: 获取指定分数区间的成员数量 ========
+	count, _ := rdb.ZCount(ctx, zsetKey, "2000", "3500").Result() // 分数在 [2000, 3500] 之间的玩家数量
+	fmt.Println("分数在2000到3500之间的玩家数量:", count)
 }
 
 func main() {
 	initRedis()
-	// StringOps()
+	StringOps()
 	ListOps()
+	HashOps()
+	SetOps()
+	SortedSetOps()
 }
